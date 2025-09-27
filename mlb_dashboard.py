@@ -1,151 +1,145 @@
-import pandas as pd
 import requests
+import pandas as pd
 import datetime as dt
-import pytz
+import os
+import json
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
+from gspread_formatting import *
 
-# ---------------------------
-# Google Sheets Setup
-# ---------------------------
-SHEET_NAME = "MLB Dashboard"
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+# -------------------------
+# Config
+# -------------------------
+API_KEY = os.environ["ODDS_API_KEY"]
+SHEET_ID = os.environ["SHEET_ID"]
+
+# Load Google Sheets credentials
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+creds_json = os.environ["GOOGLE_SHEETS_CREDENTIALS"]
+creds_dict = json.loads(creds_json)
+creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 client = gspread.authorize(creds)
-sheets_api = build("sheets", "v4", credentials=creds)
+sheet = client.open_by_key(SHEET_ID)
 
-try:
-    spreadsheet = client.open(SHEET_NAME)
-except gspread.SpreadsheetNotFound:
-    spreadsheet = client.create(SHEET_NAME)
-    spreadsheet.share("your_email@gmail.com", perm_type="user", role="writer")
-
-spreadsheet_id = spreadsheet.id
-
-# ---------------------------
-# Fetch Odds API
-# ---------------------------
-API_KEY = "YOUR_ODDS_API_KEY"
-SPORT = "baseball_mlb"
-REGION = "us"
-
+# -------------------------
+# 1. Fetch MLB Odds
+# -------------------------
 def fetch_odds():
-    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds?regions={REGION}&apiKey={API_KEY}"
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?regions=us&markets=h2h,totals,spreads&oddsFormat=decimal&apiKey={API_KEY}"
     r = requests.get(url)
     data = r.json()
 
-    games = []
-    upcoming = []
-    now = dt.datetime.now(dt.timezone.utc)
-    ct = pytz.timezone("America/Chicago")
+    games, upcoming = [], []
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=-5)))  # CT timezone
 
     for game in data:
+        home = game["home_team"]
+        away = game["away_team"]
+
+        try:
+            markets = {m["key"]: m for m in game["bookmakers"][0]["markets"]}
+        except:
+            continue
+
+        moneyline = markets.get("h2h", {}).get("outcomes", [])
+        spreads = markets.get("spreads", {}).get("outcomes", [])
+        totals = markets.get("totals", {}).get("outcomes", [])
+
+        commence = dt.datetime.fromisoformat(
+            game["commence_time"].replace("Z", "+00:00")
+        ).astimezone(now.tzinfo)
+
         row = {
-            "Game ID": game["id"],
-            "Home Team": game["home_team"],
-            "Away Team": game["away_team"],
-            "Commence Time": game["commence_time"]
+            "Game": f"{home} vs {away}",
+            "Home Team": home,
+            "Away Team": away,
+            "Commence (CT)": commence.strftime("%Y-%m-%d %H:%M"),
+            "Home ML %": round(100 * (1 / moneyline[0]["price"])) if len(moneyline) > 0 else "N/A",
+            "Away ML %": round(100 * (1 / moneyline[1]["price"])) if len(moneyline) > 1 else "N/A",
+            "Run Line Home": spreads[0]["price"] if len(spreads) > 0 else "N/A",
+            "Run Line Away": spreads[1]["price"] if len(spreads) > 1 else "N/A",
+            "Total Over": totals[0]["price"] if len(totals) > 0 else "N/A",
+            "Total Under": totals[1]["price"] if len(totals) > 1 else "N/A",
+            "Last Updated": now.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        commence = pd.to_datetime(game["commence_time"], utc=True)
-
         if commence > now:
-            row["Commence Time"] = commence.tz_convert(ct).strftime("%m/%d/%Y %I:%M %p CT")
             upcoming.append(row)
         else:
-            row["Commence Time"] = commence.tz_convert(ct).strftime("%m/%d/%Y %I:%M %p CT")
             games.append(row)
 
     return pd.DataFrame(games), pd.DataFrame(upcoming)
 
-# ---------------------------
-# Clean DataFrame
-# ---------------------------
-def clean_dataframe(df):
-    if df.empty:
-        return df
-
-    for col in df.columns:
-        if df[col].dtype in ["float64", "int64"]:
-            if df[col].between(0, 1).all():
-                df[col] = (df[col] * 100).round(1).astype(str) + "%"
-
-    return df
-
-# ---------------------------
-# Push to Google Sheets
-# ---------------------------
-def update_sheet(sheet_name, df):
-    try:
-        worksheet = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(worksheet)
-    except gspread.exceptions.WorksheetNotFound:
-        pass
-
-    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="200", cols="20")
-
-    if not df.empty:
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-    return worksheet.id
-
-# ---------------------------
-# Add Formatting
-# ---------------------------
-def add_formatting(sheet_id, is_games_tab=False):
-    requests = []
-
-    # ✅ Color scale for percentages
-    requests.append({
-        "addConditionalFormatRule": {
-            "rule": {
-                "ranges": [{"sheetId": sheet_id}],
-                "gradientRule": {
-                    "minpoint": {"color": {"red": 1}, "type": "NUMBER", "value": "0"},
-                    "midpoint": {"color": {"red": 1, "green": 1}, "type": "NUMBER", "value": "50"},
-                    "maxpoint": {"color": {"green": 1}, "type": "NUMBER", "value": "100"}
-                }
-            },
-            "index": 0
-        }
-    })
-
-    # ✅ Strike-through finished games (Games tab only)
-    if is_games_tab:
-        requests.append({
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [{"sheetId": sheet_id}],
-                    "booleanRule": {
-                        "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": '=ROW()>1'}]},
-                        "format": {"textFormat": {"strikethrough": True}}
-                    }
-                },
-                "index": 1
-            }
-        })
-
-    body = {"requests": requests}
-    sheets_api.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
-
-# ---------------------------
-# Main
-# ---------------------------
-def main():
+# -------------------------
+# 2. Push Data to Google Sheets
+# -------------------------
+def update_sheets():
     games_df, upcoming_df = fetch_odds()
-    games_df = clean_dataframe(games_df)
-    upcoming_df = clean_dataframe(upcoming_df)
 
-    games_sheet = update_sheet("Games", games_df)
-    upcoming_sheet = update_sheet("Upcoming", upcoming_df)
+    # --- Games Tab ---
+    try:
+        ws = sheet.worksheet("Games")
+    except:
+        ws = sheet.add_worksheet(title="Games", rows="100", cols="20")
+    ws.clear()
+    ws.update([games_df.columns.values.tolist()] + games_df.values.tolist())
 
-    add_formatting(games_sheet, is_games_tab=True)
-    add_formatting(upcoming_sheet, is_games_tab=False)
+    # --- Upcoming Tab ---
+    try:
+        ws2 = sheet.worksheet("Upcoming")
+    except:
+        ws2 = sheet.add_worksheet(title="Upcoming", rows="100", cols="20")
+    ws2.clear()
+    ws2.update([upcoming_df.columns.values.tolist()] + upcoming_df.values.tolist())
 
-    print("✅ Sheets updated with color coding & strike-through!")
+    # -------------------------
+    # 3. Apply Formatting
+    # -------------------------
+    fmt_green = CellFormat(textFormat=TextFormat(bold=True), backgroundColor=Color(0.8, 1, 0.8))
+    fmt_red = CellFormat(textFormat=TextFormat(bold=True), backgroundColor=Color(1, 0.8, 0.8))
+    fmt_strike = CellFormat(textFormat=TextFormat(strikethrough=True))
 
+    # Apply % win column formatting
+    for tab in ["Games", "Upcoming"]:
+        ws = sheet.worksheet(tab)
+        data = ws.get_all_values()
+
+        if len(data) > 1:  # skip empty
+            rows = len(data)
+            home_vals = ws.range(f"E2:E{rows}")  # Home ML %
+            away_vals = ws.range(f"F2:F{rows}")  # Away ML %
+
+            for cell in home_vals:
+                try:
+                    val = float(cell.value)
+                    if val > 50:
+                        format_cell_range(ws, cell.address, fmt_green)
+                    else:
+                        format_cell_range(ws, cell.address, fmt_red)
+                except:
+                    pass
+
+            for cell in away_vals:
+                try:
+                    val = float(cell.value)
+                    if val > 50:
+                        format_cell_range(ws, cell.address, fmt_green)
+                    else:
+                        format_cell_range(ws, cell.address, fmt_red)
+                except:
+                    pass
+
+        # Strike-through finished games (only in Games tab)
+        if tab == "Games":
+            finished = ws.range(f"A2:A{rows}")
+            for cell in finished:
+                if cell.value:  # If game listed
+                    format_cell_range(ws, cell.address, fmt_strike)
+
+    print("✅ Sheets updated & formatted successfully.")
+
+# -------------------------
+# Main
+# -------------------------
 if __name__ == "__main__":
-    main()
+    update_sheets()
