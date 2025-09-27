@@ -1,129 +1,151 @@
-import os
-import requests
 import pandas as pd
+import requests
 import datetime as dt
 import pytz
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from pybaseball import pitching_stats, batting_stats, statcast
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
-# --------------------------
-# 1. Auth Google Sheets
-# --------------------------
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
-creds_json = os.environ["GOOGLE_SHEETS_CRED"]
-with open("creds.json", "w") as f:
-    f.write(creds_json)
-creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
+# ---------------------------
+# Google Sheets Setup
+# ---------------------------
+SHEET_NAME = "MLB Dashboard"
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
+sheets_api = build("sheets", "v4", credentials=creds)
 
-SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
-sheet = client.open_by_key(SHEET_ID)
+try:
+    spreadsheet = client.open(SHEET_NAME)
+except gspread.SpreadsheetNotFound:
+    spreadsheet = client.create(SHEET_NAME)
+    spreadsheet.share("your_email@gmail.com", perm_type="user", role="writer")
 
-# --------------------------
-# 2. Odds API
-# --------------------------
-API_KEY = os.environ["ODDS_API_KEY"]
+spreadsheet_id = spreadsheet.id
+
+# ---------------------------
+# Fetch Odds API
+# ---------------------------
+API_KEY = "YOUR_ODDS_API_KEY"
+SPORT = "baseball_mlb"
+REGION = "us"
 
 def fetch_odds():
-    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?regions=us&markets=h2h,totals,spreads&oddsFormat=decimal&apiKey={API_KEY}"
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds?regions={REGION}&apiKey={API_KEY}"
     r = requests.get(url)
     data = r.json()
-    games, upcoming = [], []
 
+    games = []
+    upcoming = []
+    now = dt.datetime.now(dt.timezone.utc)
     ct = pytz.timezone("America/Chicago")
-    now_ct = dt.datetime.now(ct)
 
     for game in data:
-        home = game["home_team"]
-        away = game["away_team"]
-
-        try:
-            markets = {m["key"]: m for m in game["bookmakers"][0]["markets"]}
-        except:
-            continue
-
-        moneyline = markets.get("h2h", {}).get("outcomes", [])
-        spreads = markets.get("spreads", {}).get("outcomes", [])
-        totals = markets.get("totals", {}).get("outcomes", [])
-
-        # convert to probability %
-        def odds_to_prob(odds):
-            try:
-                return round((1/float(odds))*100,2)
-            except:
-                return "N/A"
-
-        home_ml = odds_to_prob(moneyline[0]["price"]) if len(moneyline) > 0 else "N/A"
-        away_ml = odds_to_prob(moneyline[1]["price"]) if len(moneyline) > 1 else "N/A"
-
-        start_time = pd.to_datetime(game["commence_time"]).tz_convert(ct)
-
         row = {
-            "Game": f"{home} vs {away}",
-            "Start Time": start_time.strftime("%Y-%m-%d %I:%M %p"),
-            "Home Team": home,
-            "Away Team": away,
-            "Home ML %": home_ml,
-            "Away ML %": away_ml,
-            "Run Line Home": spreads[0]["price"] if len(spreads) > 0 else "N/A",
-            "Run Line Away": spreads[1]["price"] if len(spreads) > 1 else "N/A",
-            "Total Over": totals[0]["price"] if len(totals) > 0 else "N/A",
-            "Total Under": totals[1]["price"] if len(totals) > 1 else "N/A",
-            "Last Updated": now_ct.strftime("%Y-%m-%d %H:%M:%S")
+            "Game ID": game["id"],
+            "Home Team": game["home_team"],
+            "Away Team": game["away_team"],
+            "Commence Time": game["commence_time"]
         }
 
-        if start_time.date() == now_ct.date():
-            games.append(row)
-        elif start_time.date() > now_ct.date():
+        commence = pd.to_datetime(game["commence_time"], utc=True)
+
+        if commence > now:
+            row["Commence Time"] = commence.tz_convert(ct).strftime("%m/%d/%Y %I:%M %p CT")
             upcoming.append(row)
+        else:
+            row["Commence Time"] = commence.tz_convert(ct).strftime("%m/%d/%Y %I:%M %p CT")
+            games.append(row)
 
     return pd.DataFrame(games), pd.DataFrame(upcoming)
 
-games_df, upcoming_df = fetch_odds()
+# ---------------------------
+# Clean DataFrame
+# ---------------------------
+def clean_dataframe(df):
+    if df.empty:
+        return df
 
-# --------------------------
-# 3. Season Stats
-# --------------------------
-pitching_df = pitching_stats(2024)[["Name","Team","ERA","WHIP","FIP","IP","SO","BB","HR"]]
-hitting_df = batting_stats(2024)[["Name","Team","AVG","OBP","SLG","OPS","HR","RBI","SO","BB"]]
+    for col in df.columns:
+        if df[col].dtype in ["float64", "int64"]:
+            if df[col].between(0, 1).all():
+                df[col] = (df[col] * 100).round(1).astype(str) + "%"
 
-# --------------------------
-# 4. Last 5 Games
-# --------------------------
-def last5_pitchers():
-    today = dt.datetime.now().strftime("%Y-%m-%d")
-    df = statcast(start_dt=(dt.datetime.now()-dt.timedelta(days=10)).strftime("%Y-%m-%d"),
-                  end_dt=today)
-    return df.groupby("pitcher").tail(5)
+    return df
 
-def last5_hitters():
-    today = dt.datetime.now().strftime("%Y-%m-%d")
-    df = statcast(start_dt=(dt.datetime.now()-dt.timedelta(days=10)).strftime("%Y-%m-%d"),
-                  end_dt=today)
-    return df.groupby("batter").tail(5)
-
-pitchers5_df = last5_pitchers()
-hitters5_df = last5_hitters()
-
-# --------------------------
-# 5. Write to Sheets
-# --------------------------
-def write_sheet(df, tab):
+# ---------------------------
+# Push to Google Sheets
+# ---------------------------
+def update_sheet(sheet_name, df):
     try:
-        ws = sheet.worksheet(tab)
-        sheet.del_worksheet(ws)
-    except:
+        worksheet = spreadsheet.worksheet(sheet_name)
+        spreadsheet.del_worksheet(worksheet)
+    except gspread.exceptions.WorksheetNotFound:
         pass
-    ws = sheet.add_worksheet(title=tab, rows=str(len(df)+5), cols="20")
-    ws.update([df.columns.values.tolist()] + df.values.tolist())
 
-write_sheet(games_df, "Games")
-write_sheet(upcoming_df, "Upcoming Games")
-write_sheet(pitching_df, "Pitcher Stats")
-write_sheet(hitting_df, "Hitter Stats")
-write_sheet(pitchers5_df, "Last 5 Pitchers")
-write_sheet(hitters5_df, "Last 5 Hitters")
+    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="200", cols="20")
 
-print("✅ Google Sheet updated successfully")
+    if not df.empty:
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+    return worksheet.id
+
+# ---------------------------
+# Add Formatting
+# ---------------------------
+def add_formatting(sheet_id, is_games_tab=False):
+    requests = []
+
+    # ✅ Color scale for percentages
+    requests.append({
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{"sheetId": sheet_id}],
+                "gradientRule": {
+                    "minpoint": {"color": {"red": 1}, "type": "NUMBER", "value": "0"},
+                    "midpoint": {"color": {"red": 1, "green": 1}, "type": "NUMBER", "value": "50"},
+                    "maxpoint": {"color": {"green": 1}, "type": "NUMBER", "value": "100"}
+                }
+            },
+            "index": 0
+        }
+    })
+
+    # ✅ Strike-through finished games (Games tab only)
+    if is_games_tab:
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id}],
+                    "booleanRule": {
+                        "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": '=ROW()>1'}]},
+                        "format": {"textFormat": {"strikethrough": True}}
+                    }
+                },
+                "index": 1
+            }
+        })
+
+    body = {"requests": requests}
+    sheets_api.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+
+# ---------------------------
+# Main
+# ---------------------------
+def main():
+    games_df, upcoming_df = fetch_odds()
+    games_df = clean_dataframe(games_df)
+    upcoming_df = clean_dataframe(upcoming_df)
+
+    games_sheet = update_sheet("Games", games_df)
+    upcoming_sheet = update_sheet("Upcoming", upcoming_df)
+
+    add_formatting(games_sheet, is_games_tab=True)
+    add_formatting(upcoming_sheet, is_games_tab=False)
+
+    print("✅ Sheets updated with color coding & strike-through!")
+
+if __name__ == "__main__":
+    main()
