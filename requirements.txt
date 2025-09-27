@@ -1,0 +1,6 @@
+pybaseball
+pandas
+requests
+gspread
+oauth2client
+openpyxl
