@@ -1,8 +1,8 @@
+pybaseball
 pandas
 requests
 gspread
-oauth2client
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
 gspread-formatting
+oauth2client
+openpyxl
+google-api-python-client
