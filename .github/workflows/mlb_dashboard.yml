@@ -1,9 +1,9 @@
 name: MLB Dashboard Bot
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 11 * * *"   # Runs every day at 11:00 UTC (adjust if needed)
-  workflow_dispatch:        # Allow manual runs
+    - cron: "0 12 * * *"   # Runs every day at 12:00 UTC (7am CT)
 
 jobs:
   build:
@@ -18,15 +18,13 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas requests gspread oauth2client google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pytz
+        run: pip install -r requirements.txt
 
       - name: Run script
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          python mlb_dashboard.py
+          GOOGLE_APPLICATION_CREDENTIALS: service_account.json
+        run: python mlb_dashboard.py
