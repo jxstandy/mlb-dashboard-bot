@@ -3,7 +3,7 @@ name: Run Sports Odds Dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"  # runs every hour
 
 jobs:
   build:
@@ -25,7 +25,7 @@ jobs:
 
       - name: Create service_account.json
         run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > service_account.json
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > service_account.json
 
       - name: Run MLB Dashboard Script
         env:
