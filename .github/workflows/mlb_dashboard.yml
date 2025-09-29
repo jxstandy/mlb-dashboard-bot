@@ -1,37 +1,30 @@
-name: MLB Dashboard Bot
+name: MLB Dashboard Auto Update
 
 on:
   schedule:
-    - cron: "0 15 * * *"   # 10 AM CT = 15:00 UTC
-  workflow_dispatch:
+    - cron: "0 12 * * *"   # Runs every day at 12:00 UTC (6 AM CT)
+  workflow_dispatch:        # Allows manual trigger
 
 jobs:
-  build:
+  update-mlb-dashboard:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout Repo
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
 
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-v2-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    - name: Install Dependencies
+      run: |
+        pip install pybaseball requests pandas gspread openpyxl google-auth
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run script
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python mlb_dashboard.py
+    - name: Run Script
+      env:
+        GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      run: |
+        echo "${GOOGLE_CREDENTIALS}" > service_account.json
+        python mlb_dashboard.py
