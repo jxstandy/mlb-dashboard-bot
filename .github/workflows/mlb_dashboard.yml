@@ -1,14 +1,13 @@
-name: Update MLB Dashboard
+name: Run MLB Dashboard
 
 on:
   schedule:
-    - cron: "0 14 * * *"  # Runs every day at 9AM CT (14:00 UTC)
-  workflow_dispatch:      # Manual trigger button in GitHub
+    - cron: "0 * * * *"  # every hour
+  workflow_dispatch:      # allow manual runs
 
 jobs:
-  build:
+  run-mlb-dashboard:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -20,12 +19,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas openpyxl pybaseball gspread oauth2client gspread_formatting
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Save Google credentials
+        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" > service_account.json
 
       - name: Run MLB Dashboard Script
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: |
-          echo "${GOOGLE_CREDENTIALS}" > service_account.json
-          python mlb_dashboard.py
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python mlb_dashboard.py
