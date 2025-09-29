@@ -1,3 +1,4 @@
+import os
 import requests
 import pandas as pd
 import datetime as dt
@@ -7,18 +8,18 @@ from google.oauth2.service_account import Credentials
 from gspread_formatting import *
 
 # -------------------------
-# CONFIG
+# CONFIG (from GitHub secrets)
 # -------------------------
-ODDS_API_KEY = "ac062d318b462f4a2efe7b5ce7bf8cdb"
-SPREADSHEET_NAME = "MLB_Dashboard"
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 # Google Sheets setup
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"   # ✅ added drive scope
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
+
+# Always open by ID (no auto-create)
+sheet = client.open_by_key(SPREADSHEET_ID)
 
 # -------------------------
 # 1. Fetch MLB Odds
@@ -68,12 +69,6 @@ hitting_df = batting_stats(2024)[["Name", "Team", "AVG", "OBP", "SLG", "OPS", "H
 # -------------------------
 # 3. Push to Google Sheets
 # -------------------------
-try:
-    sheet = client.open(SPREADSHEET_NAME)
-except gspread.SpreadsheetNotFound:
-    sheet = client.create(SPREADSHEET_NAME)
-    sheet.share("", perm_type="anyone", role="writer")
-
 def update_sheet(df, tab_name):
     try:
         ws = sheet.worksheet(tab_name)
@@ -91,7 +86,6 @@ update_sheet(hitting_df, "Hitter Stats")
 # -------------------------
 # 4. Formatting (Color + Strike-through)
 # -------------------------
-
 fmt_fav = CellFormat(backgroundColor=Color(0.8, 1, 0.8))   # light green
 fmt_dog = CellFormat(backgroundColor=Color(1, 0.8, 0.8))   # light red
 fmt_finished = CellFormat(textFormat=TextFormat(strikethrough=True, foregroundColor=Color(0.7, 0.7, 0.7)))  # gray strike-through
