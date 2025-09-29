@@ -14,33 +14,29 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 # Google Sheets setup
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
+
+# Always open by ID (no auto-create)
 sheet = client.open_by_key(SPREADSHEET_ID)
+print(f"✅ Connected to Google Sheet ID: {SPREADSHEET_ID}")
 
 # -------------------------
-# 1. Fetch ALL available sports
+# 1. Fetch MLB Odds
 # -------------------------
-def fetch_sports():
-    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
-    r = requests.get(url)
-    data = r.json()
-    sports = {s["key"]: s["title"] for s in data if s.get("active", True)}
-    return sports
-
-# -------------------------
-# 2. Fetch odds for a given sport
-# -------------------------
-def fetch_odds(sport_key):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?regions=us&markets=h2h,totals,spreads&oddsFormat=decimal&apiKey={ODDS_API_KEY}"
+def fetch_odds():
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?regions=us&markets=h2h,totals,spreads&oddsFormat=decimal&apiKey={ODDS_API_KEY}"
     r = requests.get(url)
     data = r.json()
 
     games = []
     for game in data:
-        home = game.get("home_team", "N/A")
-        away = game.get("away_team", "N/A")
+        home = game["home_team"]
+        away = game["away_team"]
 
         try:
             markets = {m["key"]: m for m in game["bookmakers"][0]["markets"]}
@@ -61,20 +57,21 @@ def fetch_odds(sport_key):
             "Run Line Away": spreads[1]["price"] if len(spreads) > 1 else "N/A",
             "Total Over": totals[0]["price"] if len(totals) > 0 else "N/A",
             "Total Under": totals[1]["price"] if len(totals) > 1 else "N/A",
-            "Commence Time": dt.datetime.fromisoformat(game["commence_time"].replace("Z","")).strftime("%Y-%m-%d %H:%M:%S") if "commence_time" in game else "N/A",
             "Last Updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
     return pd.DataFrame(games)
 
+games_df = fetch_odds()
+
 # -------------------------
-# 3. MLB Stats (pybaseball)
+# 2. Pitcher + Hitter Stats
 # -------------------------
 pitching_df = pitching_stats(2024)[["Name", "Team", "ERA", "WHIP", "FIP", "IP"]]
 hitting_df = batting_stats(2024)[["Name", "Team", "AVG", "OBP", "SLG", "OPS", "HR", "RBI", "SO", "BB"]]
 
 # -------------------------
-# 4. Push to Google Sheets
+# 3. Push to Google Sheets
 # -------------------------
 def update_sheet(df, tab_name):
     try:
@@ -83,47 +80,40 @@ def update_sheet(df, tab_name):
     except:
         pass
     ws = sheet.add_worksheet(title=tab_name, rows="100", cols="20")
-    if not df.empty:
-        ws.update([df.columns.values.tolist()] + df.values.tolist())
+    ws.update([df.columns.values.tolist()] + df.values.tolist())
     return ws
 
+ws_games = update_sheet(games_df, "Games")
+update_sheet(pitching_df, "Pitcher Stats")
+update_sheet(hitting_df, "Hitter Stats")
+
 # -------------------------
-# 5. Formatting
+# 4. Formatting (Color + Strike-through)
 # -------------------------
 fmt_fav = CellFormat(backgroundColor=Color(0.8, 1, 0.8))   # light green
 fmt_dog = CellFormat(backgroundColor=Color(1, 0.8, 0.8))   # light red
 fmt_finished = CellFormat(textFormat=TextFormat(strikethrough=True, foregroundColor=Color(0.7, 0.7, 0.7)))  # gray strike-through
 
-def format_odds_tab(ws):
-    game_data = ws.get_all_records()
-    for i, row in enumerate(game_data, start=2):
-        home_ml = row.get("Home ML")
-        away_ml = row.get("Away ML")
-        try:
-            if home_ml != "N/A" and away_ml != "N/A":
-                if float(home_ml) < float(away_ml):
-                    format_cell_range(ws, f"D{i}", fmt_fav)
-                    format_cell_range(ws, f"E{i}", fmt_dog)
-                else:
-                    format_cell_range(ws, f"D{i}", fmt_dog)
-                    format_cell_range(ws, f"E{i}", fmt_fav)
-        except:
-            pass
-        if "Final" in row["Game"]:
-            format_cell_range(ws, f"A{i}:J{i}", fmt_finished)
+# Apply formatting
+game_data = ws_games.get_all_records()
+for i, row in enumerate(game_data, start=2):  # row 2 onwards (row 1 is headers)
+    home_ml = row.get("Home ML")
+    away_ml = row.get("Away ML")
 
-# -------------------------
-# Run: All Sports + MLB Stats
-# -------------------------
-sports = fetch_sports()
+    # Moneyline logic: lower odds = favorite
+    try:
+        if home_ml != "N/A" and away_ml != "N/A":
+            if float(home_ml) < float(away_ml):
+                format_cell_range(ws_games, f"D{i}", fmt_fav)
+                format_cell_range(ws_games, f"E{i}", fmt_dog)
+            else:
+                format_cell_range(ws_games, f"D{i}", fmt_dog)
+                format_cell_range(ws_games, f"E{i}", fmt_fav)
+    except:
+        pass
 
-for key, title in sports.items():
-    odds_df = fetch_odds(key)
-    tab_name = f"{title} Odds"
-    ws = update_sheet(odds_df, tab_name)
-    format_odds_tab(ws)
+    # Example: cross out games already played (stub logic for now)
+    if "Final" in row["Game"]:
+        format_cell_range(ws_games, f"A{i}:J{i}", fmt_finished)
 
-update_sheet(pitching_df, "Pitcher Stats")
-update_sheet(hitting_df, "Hitter Stats")
-
-print("✅ Dashboard updated with ALL available sports + MLB stats + formatting")
+print("✅ MLB Dashboard updated in Google Sheets with formatting")
