@@ -20,6 +20,7 @@ client = gspread.authorize(creds)
 
 # Always open by ID (no auto-create)
 sheet = client.open_by_key(SPREADSHEET_ID)
+print(f"🔗 Connected to Google Sheet ID: {SPREADSHEET_ID}")
 
 # -------------------------
 # 1. Fetch MLB Odds
