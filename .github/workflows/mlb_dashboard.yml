@@ -19,9 +19,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+  run: |
+    pip install --upgrade pip
+    pip install gspread pandas requests google-auth gspread-dataframe
 
       - name: Create service_account.json
         run: |
