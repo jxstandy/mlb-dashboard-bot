@@ -14,16 +14,17 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 # Google Sheets setup
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
+# 🔎 Debug prints
+print("🔑 Using Sheet ID:", SPREADSHEET_ID)
+print("👤 Service account email:", creds.service_account_email)
+
 # Always open by ID (no auto-create)
 sheet = client.open_by_key(SPREADSHEET_ID)
-print(f"✅ Connected to Google Sheet ID: {SPREADSHEET_ID}")
+print("✅ Connected successfully to Google Sheet")
 
 # -------------------------
 # 1. Fetch MLB Odds
