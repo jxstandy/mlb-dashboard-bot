@@ -1,32 +1,36 @@
-name: Run dashboard script
+name: Sports Odds Dashboard
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *" # run hourly
+    - cron: "0 * * * *"   # runs every hour
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install gspread pandas google-auth requests gspread-dataframe
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install gspread pandas requests gspread-dataframe gspread-formatting
 
-      - name: Run dashboard script
-        env:
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          GOOGLE_SERVICE_JSON: ${{ secrets.GOOGLE_SERVICE_JSON }}
-        run: |
-          echo "▶️ Running dashboard script..."
-          python mlb_dashboard.py
+    - name: Create service_account.json
+      run: |
+        echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT }}" > service_account.json
+
+    - name: Run dashboard script
+      env:
+        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      run: |
+        echo "▶️ Running dashboard script..."
+        python mlb_dashboard.py
