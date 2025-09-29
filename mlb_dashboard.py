@@ -13,7 +13,10 @@ ODDS_API_KEY = "ac062d318b462f4a2efe7b5ce7bf8cdb"
 SPREADSHEET_NAME = "MLB_Dashboard"
 
 # Google Sheets setup
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"   # ✅ added drive scope
+]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
