@@ -3,7 +3,7 @@ name: Run Sports Odds Dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"   # Runs every hour (adjust as needed)
+    - cron: "0 * * * *"
 
 jobs:
   build:
@@ -22,6 +22,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Create service_account.json
+        run: |
+          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > service_account.json
 
       - name: Run MLB Dashboard Script
         env:
