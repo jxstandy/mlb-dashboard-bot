@@ -1,110 +1,138 @@
 import os
+import requests
+import pandas as pd
+import datetime as dt
 import gspread
 from google.oauth2.service_account import Credentials
-import requests
+from gspread_formatting import *
 
-# ------------------------------------------------------
+# -------------------------
 # CONFIG
-# ------------------------------------------------------
-# Add both Sheets + Drive scopes (needed for creating new sheets)
+# -------------------------
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+
+if not SPREADSHEET_ID:
+    raise ValueError("❌ SPREADSHEET_ID is missing. Please set it in GitHub Secrets.")
+
+# Google Sheets setup
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
-
-# Load service account
-SERVICE_ACCOUNT_FILE = "service_account.json"
-
-# Get Spreadsheet ID from environment if provided
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", None)
-
-# Sports to pull odds for
-SPORTS = [
-    "baseball_mlb",
-    "basketball_nba",
-    "basketball_ncaab",
-    "football_nfl",
-    "football_ncaaf",
-    "icehockey_nhl",
-    "soccer_epl",
-    "soccer_uefa_champs_league",
-    "mma_mixed_martial_arts",
-    "tennis_atp_singles"
-]
-
-# Replace with your Odds API key
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-
-# ------------------------------------------------------
-# AUTHENTICATION
-# ------------------------------------------------------
-creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# If no spreadsheet ID is provided, create a new one
-if not SPREADSHEET_ID:
-    print("⚠️ No Spreadsheet ID provided. Creating new sheet...")
-    spreadsheet = client.create("Sports Odds Dashboard")
-    SPREADSHEET_ID = spreadsheet.id
-    print(f"✅ Created new spreadsheet: {SPREADSHEET_ID}")
-else:
-    try:
-        spreadsheet = client.open_by_key(SPREADSHEET_ID)
-        print(f"✅ Using existing spreadsheet: {SPREADSHEET_ID}")
-    except Exception as e:
-        print(f"⚠️ Could not open sheet by ID ({SPREADSHEET_ID}), creating new one instead...")
-        spreadsheet = client.create("Sports Odds Dashboard")
-        SPREADSHEET_ID = spreadsheet.id
-        print(f"✅ Created new spreadsheet: {SPREADSHEET_ID}")
+print(f"✅ Using Spreadsheet ID: {SPREADSHEET_ID}")
+sheet = client.open_by_key(SPREADSHEET_ID)
 
-# ------------------------------------------------------
-# FETCH ODDS DATA
-# ------------------------------------------------------
+# -------------------------
+# Get all available sports from Odds API
+# -------------------------
+def fetch_sports():
+    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
+    r = requests.get(url)
+    if r.status_code != 200:
+        raise Exception(f"❌ Error fetching sports list: {r.text}")
+    sports_data = r.json()
+    sports = {s["title"]: s["key"] for s in sports_data}
+    return sports
+
+# -------------------------
+# Fetch Odds for a given sport
+# -------------------------
 def fetch_odds(sport_key):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "us",
-        "markets": "h2h",
-        "oddsFormat": "decimal"
-    }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"⚠️ Failed to fetch odds for {sport_key}: {response.text}")
-        return []
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?regions=us&markets=h2h,totals,spreads&oddsFormat=decimal&apiKey={ODDS_API_KEY}"
+    r = requests.get(url)
+    if r.status_code != 200:
+        print(f"❌ Error fetching {sport_key}: {r.text}")
+        return pd.DataFrame()
+    data = r.json()
 
-# ------------------------------------------------------
-# UPDATE SHEETS
-# ------------------------------------------------------
-for sport in SPORTS:
-    data = fetch_odds(sport)
-
-    # Prepare rows
-    rows = [["Home Team", "Away Team", "Bookmaker", "Home Odds", "Away Odds"]]
+    games = []
     for game in data:
-        home_team = game.get("home_team", "N/A")
-        away_team = [team for team in game["teams"] if team != home_team][0]
+        home = game["home_team"]
+        away = game["away_team"]
 
-        for bookmaker in game.get("bookmakers", []):
-            book_name = bookmaker["title"]
-            markets = bookmaker.get("markets", [])
-            if markets:
-                outcomes = markets[0].get("outcomes", [])
-                home_odds = next((o["price"] for o in outcomes if o["name"] == home_team), "N/A")
-                away_odds = next((o["price"] for o in outcomes if o["name"] == away_team), "N/A")
-                rows.append([home_team, away_team, book_name, home_odds, away_odds])
+        try:
+            markets = {m["key"]: m for m in game["bookmakers"][0]["markets"]}
+        except:
+            continue
 
-    # Update or create worksheet
+        moneyline = markets.get("h2h", {}).get("outcomes", [])
+        spreads = markets.get("spreads", {}).get("outcomes", [])
+        totals = markets.get("totals", {}).get("outcomes", [])
+
+        games.append({
+            "Game": f"{home} vs {away}",
+            "Home Team": home,
+            "Away Team": away,
+            "Home ML": moneyline[0]["price"] if len(moneyline) > 0 else "N/A",
+            "Away ML": moneyline[1]["price"] if len(moneyline) > 1 else "N/A",
+            "Spread Home": spreads[0]["price"] if len(spreads) > 0 else "N/A",
+            "Spread Away": spreads[1]["price"] if len(spreads) > 1 else "N/A",
+            "Total Over": totals[0]["price"] if len(totals) > 0 else "N/A",
+            "Total Under": totals[1]["price"] if len(totals) > 1 else "N/A",
+            "Last Updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+    return pd.DataFrame(games)
+
+# -------------------------
+# Update Google Sheets tab
+# -------------------------
+def update_sheet(df, tab_name):
     try:
-        worksheet = spreadsheet.worksheet(sport)
-        spreadsheet.del_worksheet(worksheet)  # refresh old sheet
+        ws = sheet.worksheet(tab_name)
+        sheet.del_worksheet(ws)
     except:
         pass
 
-    worksheet = spreadsheet.add_worksheet(title=sport, rows=len(rows), cols=len(rows[0]))
-    worksheet.update("A1", rows)
-    print(f"✅ Updated sheet for {sport}")
+    ws = sheet.add_worksheet(title=tab_name[:99], rows="200", cols="20")
+    if not df.empty:
+        ws.update([df.columns.values.tolist()] + df.values.tolist())
+    return ws
 
-print(f"🎉 All sports odds updated in spreadsheet: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
+# -------------------------
+# Formatting rules
+# -------------------------
+fmt_fav = CellFormat(backgroundColor=Color(0.8, 1, 0.8))   # light green
+fmt_dog = CellFormat(backgroundColor=Color(1, 0.8, 0.8))   # light red
+fmt_finished = CellFormat(
+    textFormat=TextFormat(strikethrough=True, foregroundColor=Color(0.7, 0.7, 0.7))
+)  # gray strike-through
+
+def apply_formatting(ws):
+    game_data = ws.get_all_records()
+    for i, row in enumerate(game_data, start=2):
+        home_ml = row.get("Home ML")
+        away_ml = row.get("Away ML")
+
+        try:
+            if home_ml != "N/A" and away_ml != "N/A":
+                if float(home_ml) < float(away_ml):
+                    format_cell_range(ws, f"D{i}", fmt_fav)
+                    format_cell_range(ws, f"E{i}", fmt_dog)
+                else:
+                    format_cell_range(ws, f"D{i}", fmt_dog)
+                    format_cell_range(ws, f"E{i}", fmt_fav)
+        except:
+            pass
+
+        if "Final" in row["Game"]:
+            format_cell_range(ws, f"A{i}:J{i}", fmt_finished)
+
+# -------------------------
+# Run for all sports
+# -------------------------
+sports = fetch_sports()
+print(f"📊 Found {len(sports)} sports")
+
+for sport_name, sport_key in sports.items():
+    print(f"➡️ Updating {sport_name} ({sport_key})...")
+    df = fetch_odds(sport_key)
+    ws = update_sheet(df, sport_name)
+    if not df.empty:
+        apply_formatting(ws)
+
+print("✅ All available sports updated in Google Sheets with formatting")
