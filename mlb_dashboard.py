@@ -1,143 +1,146 @@
 import os
+import json
 import requests
 import pandas as pd
-import datetime as dt
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread_formatting import *
 from gspread_dataframe import set_with_dataframe
+from gspread_formatting import (
+    CellFormat, Color, set_frozen, format_cell_ranges, ConditionalFormatRule, BooleanCondition
+)
 
-# -------------------------
-# CONFIG
-# -------------------------
+# =========================
+# Load Environment Variables
+# =========================
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 if not SPREADSHEET_ID:
     raise ValueError("❌ SPREADSHEET_ID is missing. Please set it in GitHub Secrets.")
+if not ODDS_API_KEY:
+    raise ValueError("❌ ODDS_API_KEY is missing. Please set it in GitHub Secrets.")
 
-# Google Sheets setup
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+# =========================
+# Google Sheets Auth
+# =========================
+creds_dict = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
+creds = Credentials.from_service_account_info(
+    creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
 client = gspread.authorize(creds)
+spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-sheet = client.open_by_key(SPREADSHEET_ID)
-print(f"✅ Using Spreadsheet ID: {SPREADSHEET_ID}")
-
-# -------------------------
-# Helper to fetch odds
-# -------------------------
-def fetch_odds(sport_key, sport_name):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
-    params = {
-        "regions": "us",
-        "markets": "h2h,spreads,totals",
-        "oddsFormat": "decimal",
-        "apiKey": ODDS_API_KEY
-    }
-    r = requests.get(url, params=params)
-    if r.status_code != 200:
-        print(f"❌ Error fetching {sport_name}: {r.text}")
-        return pd.DataFrame()
-
-    data = r.json()
-    games = []
-    for game in data:
-        home = game.get("home_team")
-        away = game.get("away_team")
-        bookmakers = game.get("bookmakers", [])
-        if not bookmakers:
-            continue
-
-        try:
-            markets = {m["key"]: m for m in bookmakers[0]["markets"]}
-        except:
-            continue
-
-        moneyline = markets.get("h2h", {}).get("outcomes", [])
-        spreads = markets.get("spreads", {}).get("outcomes", [])
-        totals = markets.get("totals", {}).get("outcomes", [])
-
-        games.append({
-            "Game": f"{home} vs {away}",
-            "Home Team": home,
-            "Away Team": away,
-            "Home ML": moneyline[0]["price"] if len(moneyline) > 0 else "N/A",
-            "Away ML": moneyline[1]["price"] if len(moneyline) > 1 else "N/A",
-            "Run/Spread Home": spreads[0]["price"] if len(spreads) > 0 else "N/A",
-            "Run/Spread Away": spreads[1]["price"] if len(spreads) > 1 else "N/A",
-            "Total Over": totals[0]["price"] if len(totals) > 0 else "N/A",
-            "Total Under": totals[1]["price"] if len(totals) > 1 else "N/A",
-            "Last Updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-
-    return pd.DataFrame(games)
-
-# -------------------------
-# Update sheet
-# -------------------------
-def update_sheet(df, tab_name):
-    try:
-        ws = sheet.worksheet(tab_name)
-        sheet.del_worksheet(ws)
-    except:
-        pass
-
-    ws = sheet.add_worksheet(title=tab_name, rows="200", cols="20")
-    set_with_dataframe(ws, df.fillna("N/A"))
-
-    # Apply formatting
-    fmt_fav = CellFormat(backgroundColor=Color(0.8, 1, 0.8))   # light green
-    fmt_dog = CellFormat(backgroundColor=Color(1, 0.8, 0.8))   # light red
-    fmt_finished = CellFormat(textFormat=TextFormat(strikethrough=True, foregroundColor=Color(0.7, 0.7, 0.7)))
-
-    game_data = ws.get_all_records()
-    for i, row in enumerate(game_data, start=2):
-        home_ml = row.get("Home ML")
-        away_ml = row.get("Away ML")
-
-        try:
-            if home_ml != "N/A" and away_ml != "N/A":
-                if float(home_ml) < float(away_ml):
-                    format_cell_range(ws, f"D{i}", fmt_fav)
-                    format_cell_range(ws, f"E{i}", fmt_dog)
-                else:
-                    format_cell_range(ws, f"D{i}", fmt_dog)
-                    format_cell_range(ws, f"E{i}", fmt_fav)
-        except:
-            pass
-
-        if "Final" in row["Game"]:
-            format_cell_range(ws, f"A{i}:J{i}", fmt_finished)
-
-    print(f"✅ Updated tab: {tab_name}")
-    return ws
-
-# -------------------------
-# Main Sports to Track
-# -------------------------
-major_sports = {
+# =========================
+# Major Sports to Track
+# =========================
+MAJOR_SPORTS = {
     "baseball_mlb": "MLB",
     "basketball_nba": "NBA",
     "americanfootball_nfl": "NFL",
     "icehockey_nhl": "NHL",
     "americanfootball_ncaaf": "NCAAF",
     "basketball_ncaab": "NCAAB",
-    "mma_mixed_martial_arts": "UFC/MMA",
-    "soccer_usa_mls": "Soccer (MLS)",
-    "soccer_epl": "Soccer (EPL)",
-    "golf_pga": "Golf (PGA)",
-    "tennis_atp": "Tennis (ATP)",
-    "tennis_wta": "Tennis (WTA)"
+    "soccer_epl": "Soccer_EPL",
+    "soccer_usa_mls": "Soccer_MLS",
+    "mma_mixed_martial_arts": "MMA",
+    "tennis_atp": "Tennis_ATP",
+    "tennis_wta": "Tennis_WTA",
 }
 
-# -------------------------
-# Run all sports
-# -------------------------
-for key, name in major_sports.items():
-    print(f"📊 Updating {name}...")
-    df = fetch_odds(key, name)
-    if not df.empty:
-        update_sheet(df, name)
+# =========================
+# Formatting Helpers
+# =========================
+header_fmt = CellFormat(
+    backgroundColor=Color(0.2, 0.4, 0.7),  # Blue header
+    textFormat={"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+)
 
-print("🎉 All sports updated with odds and formatting.")
+alt_row_fmt = CellFormat(backgroundColor=Color(0.95, 0.95, 0.95))  # Gray rows
+
+best_odds_fmt = CellFormat(backgroundColor=Color(0.8, 1, 0.8))  # Light green
+worst_odds_fmt = CellFormat(backgroundColor=Color(1, 0.8, 0.8))  # Light red
+
+# =========================
+# Update Sheet Function
+# =========================
+def update_sheet(df, tab_name):
+    try:
+        try:
+            ws = spreadsheet.worksheet(tab_name)
+            ws.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=tab_name, rows="200", cols="20")
+
+        # Write DataFrame
+        set_with_dataframe(ws, df)
+
+        # Freeze header + format
+        set_frozen(ws, rows=1)
+        format_cell_ranges(ws, {"1:1": header_fmt})
+
+        # Alternate rows
+        for row in range(2, len(df) + 2, 2):
+            ws.format(f"A{row}:Z{row}", alt_row_fmt)
+
+        # Apply conditional formatting for odds columns (anything with "_price")
+        rules = []
+        for idx, col in enumerate(df.columns, start=1):
+            if "price" in col.lower():  
+                col_letter = chr(64 + idx)  # convert 1 → A, 2 → B...
+                range_notation = f"{col_letter}2:{col_letter}{len(df)+1}"
+
+                # Best odds (lowest value)
+                rules.append(
+                    ConditionalFormatRule(
+                        ranges=[ws.range(range_notation)],
+                        booleanRule={
+                            "condition": BooleanCondition("NUMBER_EQ", ["=MIN($%s$2:$%s$%d)" % (col_letter, col_letter, len(df)+1)]),
+                            "format": best_odds_fmt,
+                        },
+                    )
+                )
+                # Worst odds (highest value)
+                rules.append(
+                    ConditionalFormatRule(
+                        ranges=[ws.range(range_notation)],
+                        booleanRule={
+                            "condition": BooleanCondition("NUMBER_EQ", ["=MAX($%s$2:$%s$%d)" % (col_letter, col_letter, len(df)+1)]),
+                            "format": worst_odds_fmt,
+                        },
+                    )
+                )
+
+        if rules:
+            ws.format(rules)
+
+        print(f"✅ Updated {tab_name} with {len(df)} rows.")
+
+    except Exception as e:
+        print(f"❌ Error updating {tab_name}: {e}")
+
+# =========================
+# Main Loop
+# =========================
+for sport, tab_name in MAJOR_SPORTS.items():
+    try:
+        print(f"📊 Fetching {sport}...")
+        odds_url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
+        params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,spreads,totals"}
+        resp = requests.get(odds_url, params=params)
+
+        if resp.status_code != 200:
+            print(f"⚠️ API error {sport}: {resp.json()}")
+            continue
+
+        data = resp.json()
+        if not data:
+            print(f"ℹ️ No odds data for {sport}")
+            continue
+
+        df = pd.json_normalize(data)
+        df.columns = [col.replace(".", "_") for col in df.columns]
+
+        update_sheet(df, tab_name)
+
+    except Exception as e:
+        print(f"❌ Failed {sport}: {e}")
